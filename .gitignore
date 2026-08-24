@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.conda/
+
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+
+# SQLite DB - private leads (source of truth)
+data/*
+!data/.gitkeep
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated exports - HubSpot CSVs (re-generatable)
+exports/*
+!exports/.gitkeep
+*.csv
+!*.csv.example
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
