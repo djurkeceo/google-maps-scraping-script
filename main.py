@@ -24,7 +24,7 @@ from pathlib import Path
 from config import DEFAULT_SEARCHES, DEFAULT_MAX_RESULTS, DB_PATH, EXPORTS_DIR, CSV_COLUMNS
 from database import get_connection, init_db, upsert_lead, create_scrape_run, finish_scrape_run
 from deduplication import deduplicate_batch, find_existing
-from exporter import export_companies_csv, export_summary_info
+from exporter import export_companies_csv
 from scraper import scrape_google_maps
 from validators import validate_lead, clean_lead
 from scoring import score_lead
@@ -432,10 +432,6 @@ async def main():
         except Exception:
             pass
         print("=" * 55)
-
-        total = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
-        if total > 0:
-            print(export_summary_info())
 
         print("\n  Database updated successfully.")
 
