@@ -93,11 +93,16 @@ async def run_scraping(searches: list[tuple[str, str, str]], max_results: int) -
 def process_leads(leads: list[dict], conn, do_audit: bool = False, audit_limit: int = 0) -> dict:
     """
     Deduplikacija + validacija + upsert + optional website audit.
-    Vraća summary dict.
+    Vraća summary dict sa jasnim definicijama:
+      - scraped = Raw listings found (sirovo sa Maps)
+      - duplicates_in_batch = uklonjeni unutar istog run-a (pre DB)
+      - unique = scraped - duplicates_in_batch (prosleđeno na validaciju/DB)
+      - new_leads / updated / invalid / skipped = raspodela unique
     """
     summary = {
         "scraped": len(leads),
         "duplicates_in_batch": 0,
+        "unique": 0,
         "duplicates_existing": 0,
         "new_leads": 0,
         "updated": 0,
@@ -113,8 +118,9 @@ def process_leads(leads: list[dict], conn, do_audit: bool = False, audit_limit: 
     # 1. Deduplikacija unutar batch-a
     unique_leads, dup_in_batch = deduplicate_batch(leads)
     summary["duplicates_in_batch"] = dup_in_batch
+    summary["unique"] = len(unique_leads)
     if dup_in_batch:
-        print(f"   Duplikati unutar batch-a uklonjeni: {dup_in_batch}")
+        print(f"   Duplikati unutar batch-a uklonjeni: {dup_in_batch} (raw {len(leads)} -> unique {len(unique_leads)})")
 
     # 1b. Optional audit batch (ako je traženo, auditiraj pre upserta da scoring koristi audit)
     if do_audit and unique_leads:
@@ -338,7 +344,7 @@ async def main():
         args.audit_websites = True
         args.export_only = True
 
-    summary = {"scraped": 0, "new_leads": 0, "updated": 0, "duplicates_in_batch": 0, "duplicates_existing": 0, "invalid": 0, "skipped": 0, "websites_audited": 0, "audit_failures": 0}
+    summary = {"scraped": 0, "unique": 0, "new_leads": 0, "updated": 0, "duplicates_in_batch": 0, "duplicates_existing": 0, "invalid": 0, "skipped": 0, "websites_audited": 0, "audit_failures": 0}
     run_id = None
 
     try:
@@ -391,22 +397,31 @@ async def main():
         export_path = export_companies_csv(conn)
         print(f"\nExport: {export_path}")
 
-        # Summary
+        # Summary — jasne definicije, logički povezivo
+        raw = summary.get('scraped', 0)
+        batch_dup = summary.get('duplicates_in_batch', 0)
+        unique = summary.get('unique', raw - batch_dup)
+        # fallback ako unique nije postavljen (export-only run)
+        if unique == 0 and raw == 0:
+            unique = 0
         print("\n" + "=" * 55)
         print("  ZAVRSENO")
         print("=" * 55)
         print(f"  Scraping completed.")
-        print(f"  Results found:        {summary['scraped']}")
-        print(f"  New leads:            {summary['new_leads']}")
-        print(f"  Existing updated:     {summary['updated']}")
-        print(f"  Duplicates skipped:   {summary['duplicates_in_batch'] + summary['duplicates_existing']}")
-        print(f"  Invalid records:      {summary['invalid']}")
+        print(f"  Raw listings found:       {raw}")
+        print(f"  Batch duplicates removed: {batch_dup}")
+        print(f"  Unique listings:          {unique}")
+        print(f"  New leads:                {summary['new_leads']}")
+        print(f"  Existing leads updated:   {summary['updated']}")
+        print(f"  Invalid records:          {summary['invalid']}")
         # audit stats
         if args.audit_websites or summary.get("websites_audited", 0) > 0 or summary.get("audit_failures", 0) > 0:
-            print(f"  Websites audited:     {summary.get('websites_audited', 0)}")
-            print(f"  Audit failures:       {summary.get('audit_failures', 0)}")
+            print(f"  Websites audited:         {summary.get('websites_audited', 0)}")
+            print(f"  Audit failures:           {summary.get('audit_failures', 0)}")
         else:
-            print(f"  Websites audited:     N/A (use --audit-websites)")
+            print(f"  Websites audited:         N/A (use --audit-websites)")
+        # konzistentnost provera (debug, ne remeti)
+        # unique bi trebalo da bude new+updated+invalid+skipped
         print(f"\n  Export:   {export_path}")
         print(f"  Database: {db_path} ({conn.execute('SELECT COUNT(*) FROM leads').fetchone()[0]} ukupno)")
         # scrape_runs info

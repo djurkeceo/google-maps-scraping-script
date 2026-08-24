@@ -17,13 +17,18 @@ def calc_website_score(website: str) -> int | None:
     return calc_website_opportunity_score(website)
 
 
-def calc_website_opportunity_score(website: str) -> int | None:
+def calc_website_opportunity_score(website: str | None) -> int | None:
     """
     0 = ima dobar sajt (manja prilika)
-    10 = nema sajt uopšte (najbolji lead)
+    10 = pouzdano nema official website (najbolji lead)
     7 = zastareo sajt (srednja prilika)
+    None = nije moguće pouzdano utvrditi (unknown) — ne nagađaj
     """
-    if not website or website.strip() == "":
+    # website is None => unknown/did not check => Not Evaluated
+    if website is None:
+        return None
+    # website == "" => potvrdjeno nema official website (proverili smo authority i nije social)
+    if isinstance(website, str) and website.strip() == "":
         return 10
     url_lower = website.lower()
     for platform in OUTDATED_PLATFORMS:
@@ -39,14 +44,17 @@ def calc_seo_score(website: str, has_website: bool = True) -> int | None:
     return calc_seo_opportunity_score(website, audit_data=None)
 
 
-def calc_seo_opportunity_score(website: str, audit_data: dict | str | None = None) -> int | None:
+def calc_seo_opportunity_score(website: str | None, audit_data: dict | str | None = None) -> int | None:
     """
     SEO opportunity zahteva audit.
-    - bez sajta -> 10 (nema SEO)
+    - website is None -> None (unknown, ne nagađaj)
+    - website == "" (nema sajta) -> 10 (nema SEO)
     - sa sajtom ali bez audita -> None (Not Evaluated)
     - sa auditom: svaka missing SEO stavka povecava skor
     """
-    if not website or website.strip() == "":
+    if website is None:
+        return None
+    if isinstance(website, str) and website.strip() == "":
         return 10
 
     # pokusaj da parsiras audit_data ako je JSON string
@@ -87,14 +95,17 @@ def calc_conversion_score(website: str) -> int | None:
     return calc_conversion_opportunity_score(website, audit_data=None)
 
 
-def calc_conversion_opportunity_score(website: str, audit_data: dict | str | None = None) -> int | None:
+def calc_conversion_opportunity_score(website: str | None, audit_data: dict | str | None = None) -> int | None:
     """
     Conversion opportunity.
-    - bez sajta -> 10
+    - website is None -> None (unknown)
+    - website == "" (nema sajta) -> 10
     - sa sajtom bez audita -> None
     - sa auditom: proveri tel, form, booking, CTA, offer
     """
-    if not website or website.strip() == "":
+    if website is None:
+        return None
+    if isinstance(website, str) and website.strip() == "":
         return 10
 
     if isinstance(audit_data, str):

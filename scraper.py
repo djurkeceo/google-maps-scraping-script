@@ -20,65 +20,229 @@ def _clean_phone(phone: str) -> str:
     return re.sub(r"[^\d+\s\-\(\)]", "", phone).strip()
 
 
+SOCIAL_WEBSITE_DOMAINS = [
+    "facebook.com",
+    "m.facebook.com",
+    "instagram.com",
+    "tiktok.com",
+    "booking.com",
+    "treatwell",
+    "fresha.com",
+    "booksy.com",
+    "glovoapp.com",
+    "wolt.com",
+    "yelp.com",
+    "tripadvisor.com",
+]
+
+
+def _is_social_website(url: str) -> bool:
+    if not url:
+        return False
+    lower = url.lower()
+    return any(domain in lower for domain in SOCIAL_WEBSITE_DOMAINS)
+
+
+def _validate_rating(value) -> float | None:
+    """Vrši strogu validaciju: rating mora biti 0-5, inače None."""
+    if value is None or value == "":
+        return None
+    try:
+        r = float(str(value).replace(",", "."))
+    except (ValueError, TypeError):
+        return None
+    # rating mora biti između 0 i 5 (Google nikad ne daje >5)
+    if 0 <= r <= 5:
+        # dodatno: za listing sa recenzijama očekujemo >=1, ali dozvoli 0 za validaciju
+        return r
+    return None
+
+
+def _validate_review_count(value) -> int | None:
+    """review_count mora biti nenegativan integer."""
+    if value is None or value == "":
+        return None
+    # direktna provera za int negativan pre čišćenja (čuva predznak)
+    if isinstance(value, int) and value < 0:
+        return None
+    if isinstance(value, float) and value < 0:
+        return None
+    s = str(value).strip()
+    # ako originalni string sadrži minus, odbaci (negativan)
+    if s.startswith("-"):
+        return None
+    try:
+        cleaned = re.sub(r"[^\d]", "", s)
+        if cleaned == "":
+            return None
+        c = int(cleaned)
+        if c >= 0:
+            return c
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
 async def _extract_rating_and_reviews(page) -> tuple[float | None, int | None]:
     """
-    Pokušava da izvuče rating i broj recenzija.
-    Google Maps prikazuje npr. "4.8 ★ (137)" ili "4,8 · 137 recenzija"
+    Strogo parsira rating i review_count.
+    - rating mora biti 0-5, inače None
+    - review_count mora biti >=0 int, inače None
+    - rating i review se nikad ne smeju zameniti
+    Koristi page.evaluate JS za pouzdano pronalaženje u DOM-u, ne regex preko celog HTML-a.
     """
     rating = None
     review_count = None
 
+    # 1) Pokušaj preko page.evaluate JS — najpouzdanije
     try:
-        # Rating — traži span sa aria-label koji sadrži zvezdice
-        # Prvo pokušaj preko aria-label
-        rating_el = page.locator('span[role="img"][aria-label*="stars"], span[aria-label*="stars"]')
-        if await rating_el.count() > 0:
-            aria = await rating_el.first.get_attribute("aria-label") or ""
-            # "5.0 stars" ili "4,8 stars"
-            m = re.search(r"(\d+[.,]\d+)", aria)
-            if m:
-                rating = float(m.group(1).replace(",", "."))
+        result = await page.evaluate("""() => {
+            function extractFromAriaLabel() {
+                // traži element sa aria-label koji sadrži "stars" i recenzije
+                const candidates = document.querySelectorAll('[aria-label*="stars"], [aria-label*="Stars"], [aria-label*="zvezd"]');
+                for (const el of candidates) {
+                    const label = el.getAttribute('aria-label') || '';
+                    // primer: "4,8 stars 137 reviews" ili "4.8 stars \u00b7 137 reviews"
+                    // traži dve brojke: rating i reviews
+                    const m = label.match(/(\\d+[.,]\\d+)\\s*[^\\d]*?(\\d+)/);
+                    if (m) {
+                        return {ratingRaw: m[1], reviewsRaw: m[2], source: 'aria-stars'};
+                    }
+                    // samo rating
+                    const m2 = label.match(/(\\d+[.,]\\d+)/);
+                    if (m2 && label.toLowerCase().includes('star')) {
+                        return {ratingRaw: m2[1], reviewsRaw: null, source: 'aria-stars-only'};
+                    }
+                }
+                return null;
+            }
 
-        # Fallback: traži tekst koji liči na rating pored broja recenzija
-        if rating is None:
-            # Pokušaj preko JS evaluacije — često je rating u tekstu pored recenzija
-            content = await page.content()
-            # Pattern: 4.8 (137)  ili 4,8 · 137 recenzija
-            m = re.search(r"(\d+[.,]\d+)\s*[★\·\.]?\s*\(?\s*(\d+)\s*(?:reviews?|recenzija|ocene)?\s*\)?", content, re.IGNORECASE)
-            if m:
-                rating = float(m.group(1).replace(",", "."))
-                review_count = int(m.group(2))
+            function extractFromTextNodes() {
+                // traži text node koji izgleda kao "4.8" pored "(137)"
+                const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                let node;
+                const pattern = /(\\d[.,]\\d)\\s*[\\u2605\\u00b7\\u2022]?\\s*\\(?\\s*(\\d[\\d.,\\s]*)\\s*(?:reviews?|recenzija|recenzije|ocene|ocena|utisak|utisaka)?\\s*\\)?/i;
+                while (node = walker.nextNode()) {
+                    const txt = node.textContent.trim();
+                    // preskoči duge tekstove (koordinate, cene)
+                    if (txt.length > 50) continue;
+                    const m = txt.match(pattern);
+                    if (m) {
+                        // proveri da li je u kontekstu ratinga (blizu zvezdica)
+                        const parent = node.parentElement;
+                        const nearStars = parent && (
+                            parent.innerHTML.includes('star') ||
+                            parent.querySelector('[aria-label*="star"]') ||
+                            parent.closest('[role="img"]')
+                        );
+                        // ili da li parent sadrži oba broja
+                        return {ratingRaw: m[1], reviewsRaw: m[2], source: 'text-node'};
+                    }
+                }
+                return null;
+            }
 
-        # Review count — ako nije već pronađen
-        if review_count is None:
-            # Traži button/link koji sadrži broj recenzija
-            review_locators = [
-                'button:has-text("recenzija")',
-                'button:has-text("reviews")',
-                'a:has-text("recenzija")',
-                'span:has-text("recenzija")',
-            ]
-            for sel in review_locators:
-                loc = page.locator(sel)
-                if await loc.count() > 0:
-                    txt = await loc.first.inner_text(timeout=2000)
-                    m = re.search(r"(\d+)", txt.replace(".", "").replace(",", ""))
-                    if m:
-                        review_count = int(m.group(1))
-                        break
+            function extractSeparateSpans() {
+                // Google često ima rating u <span>4.8</span> i reviews u <span>(137)</span> ili <a>(137)</a>
+                const spans = Array.from(document.querySelectorAll('span'));
+                for (let i = 0; i < spans.length; i++) {
+                    const txt = spans[i].textContent.trim();
+                    // rating je tačno 1.0-5.0 sa jednom decimalom ili bez
+                    if (!/^(\\d[.,]\\d)$/.test(txt) && !/^(\\d)$/.test(txt)) continue;
+                    const ratingVal = parseFloat(txt.replace(',', '.'));
+                    if (ratingVal < 1 || ratingVal > 5) continue;
+                    // proveri sledećih par elemenata za reviews
+                    for (let j = i+1; j < Math.min(i+4, spans.length); j++) {
+                        const nextTxt = spans[j].textContent.trim();
+                        // reviews format: "(137)" ili "137 reviews" ili "137 recenzija"
+                        const m = nextTxt.match(/^\\(?\\s*(\\d[\\d.,\\s]*)\\s*\\)?$/);
+                        const m2 = nextTxt.match(/(\\d[\\d.,\\s]*)\\s*(?:reviews?|recenzija|ocene)/i);
+                        const raw = m ? m[1] : (m2 ? m2[1] : null);
+                        if (raw) {
+                            // mora biti u istom kontejneru kao rating (blizu)
+                            if (spans[i].parentElement === spans[j].parentElement ||
+                                spans[i].parentElement.parentElement === spans[j].parentElement.parentElement) {
+                                return {ratingRaw: txt, reviewsRaw: raw, source: 'separate-spans'};
+                            }
+                        }
+                    }
+                }
+                return null;
+            }
 
-            # Fallback: aria-label sa brojem recenzija
-            if review_count is None:
-                all_aria = page.locator('[aria-label*="recenz"]')
-                if await all_aria.count() > 0:
-                    txt = await all_aria.first.get_attribute("aria-label") or ""
-                    m = re.search(r"(\d+)", txt)
-                    if m:
-                        review_count = int(m.group(1))
-
+            return extractFromAriaLabel() || extractSeparateSpans() || extractFromTextNodes() || null;
+        }""")
+        if result and isinstance(result, dict):
+            raw_rating = result.get("ratingRaw")
+            raw_reviews = result.get("reviewsRaw")
+            # stroga validacija
+            rating = _validate_rating(raw_rating)
+            review_count = _validate_review_count(raw_reviews)
+            # ako je rating invalid, odbaci oba (ne pretpostavljaj)
+            if raw_rating is not None and rating is None:
+                # pokušaj da ne koristiš nevalidan rating kao review
+                rating = None
+            # ako je review nevalidan, odbaci
+            if raw_reviews is not None and review_count is None:
+                review_count = None
     except Exception:
         pass
 
+    # 2) Fallback: direktno preko locatora sa strogo validiranim aria-label (ne ceo page.content)
+    if rating is None:
+        try:
+            # traži sve aria-label koji sadrže star, ali validiraj 0-5
+            loc = page.locator('[aria-label*="stars"], [aria-label*="Stars"], [aria-label*="zvezd"]')
+            count = await loc.count()
+            for i in range(min(count, 3)):
+                aria = await loc.nth(i).get_attribute("aria-label") or ""
+                # mora sadržati "star" i broj 0-5
+                m = re.search(r"(\d+[.,]\d+)", aria)
+                if m:
+                    candidate = _validate_rating(m.group(1))
+                    if candidate is not None and "star" in aria.lower():
+                        rating = candidate
+                        # pokušaj da iz istog aria izvučeš reviews (druga brojka)
+                        m2 = re.search(r"(\d+[.,]\d+)\s*[^0-9]*?(\d+)", aria)
+                        if m2 and review_count is None:
+                            rc = _validate_review_count(m2.group(2))
+                            if rc is not None:
+                                review_count = rc
+                        break
+        except Exception:
+            pass
+
+    # 3) Review count poseban fallback — traži element sa "(broj)" pored ratinga
+    if review_count is None:
+        try:
+            # traži span/a koji sadrži zagrade sa brojem, ali samo ako je u blizini rating elementa
+            # ne koristi širok regex preko celog HTML-a
+            for sel in ['span:has-text("(")', 'a:has-text("(")', 'button:has-text("(")']:
+                loc = page.locator(sel)
+                cnt = await loc.count()
+                for i in range(min(cnt, 5)):
+                    txt = await loc.nth(i).inner_text(timeout=1000)
+                    # mora izgledati kao "(137)" ili "(1,234)" — ne koordinate
+                    m = re.search(r"\(\s*(\d[\d\s.,]*)\s*\)", txt)
+                    if m:
+                        # proveri da li je ovaj element blizu rating elementa (isti parent kontejner)
+                        # za sada samo validiraj da je reviews u razumnom opsegu
+                        rc = _validate_review_count(m.group(1))
+                        if rc is not None and 0 <= rc <= 1000000:
+                            # dodatna provera: ne uzimaj ako je txt predug (koordinate)
+                            if len(txt.strip()) < 20:
+                                review_count = rc
+                                break
+                if review_count is not None:
+                    break
+        except Exception:
+            pass
+
+    # Finalna validacija — nikad ne vrati rating >5 ili reviews negativan
+    rating = _validate_rating(rating)
+    review_count = _validate_review_count(review_count)
+
+    # ako je rating i dalje nevalidan, vrati None (ne nagađaj)
     return rating, review_count
 
 
@@ -194,20 +358,36 @@ async def scrape_google_maps(search_query: str, category: str = "", city: str = 
                 except Exception:
                     pass
 
-                # Website
+                # Website — strogo razlikuj official website od social
                 website = ""
+                facebook_from_website = ""
+                instagram_from_website = ""
                 try:
                     web_el = page.locator('a[data-item-id="authority"]')
                     if await web_el.count() > 0:
-                        website = await web_el.first.get_attribute("href", timeout=3000) or ""
+                        raw_href = await web_el.first.get_attribute("href", timeout=3000) or ""
+                        if raw_href and _is_social_website(raw_href):
+                            # social URL nije official website
+                            website = ""
+                            if "facebook.com" in raw_href.lower():
+                                facebook_from_website = raw_href
+                            elif "instagram.com" in raw_href.lower():
+                                instagram_from_website = raw_href
+                            # tiktok/booking ostaju van website, ne moraju u notes
+                        else:
+                            website = raw_href
                 except Exception:
                     pass
 
                 # Rating & Review Count
                 rating, review_count = await _extract_rating_and_reviews(page)
 
-                # Social
+                # Social — uključi i one iz website polja ako su bili social
                 instagram, facebook = await _extract_social_links(page)
+                if not facebook and facebook_from_website:
+                    facebook = facebook_from_website
+                if not instagram and instagram_from_website:
+                    instagram = instagram_from_website
 
                 # Place ID
                 current_url = page.url

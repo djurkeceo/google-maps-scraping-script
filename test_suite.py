@@ -281,6 +281,80 @@ def test_source_query():
     conn.close(); p.unlink(missing_ok=True)
     return ok
 
+# 12. Rating validation — nikad >5, nikad negativan
+def test_rating_validation():
+    from validators import is_valid_rating
+    from scraper import _validate_rating, _validate_review_count
+    ok = assert_eq(_validate_rating(5.5), None, "rating 5.5 -> None (invalid)")
+    ok2 = assert_eq(_validate_rating(22117.38), None, "rating 22117 -> None (production bug)")
+    ok3 = assert_eq(_validate_rating(-1), None, "rating -1 -> None")
+    ok4 = assert_eq(_validate_rating(4.8), 4.8, "rating 4.8 valid")
+    ok5 = assert_eq(_validate_rating("4,8"), 4.8, "rating '4,8' valid with comma")
+    ok6 = assert_true(not is_valid_rating(6), "is_valid_rating rejects 6")
+    ok7 = assert_true(not is_valid_rating(22117.383), "is_valid_rating rejects 22117")
+    ok8 = assert_true(is_valid_rating(4.8), "is_valid_rating accepts 4.8")
+    ok9 = assert_true(is_valid_rating(None), "None is allowed (not found)")
+    return ok and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9
+
+# 13. Review count validation — integer >=0
+def test_review_count_validation():
+    from validators import is_valid_review_count
+    from scraper import _validate_review_count
+    ok = assert_eq(_validate_review_count(-5), None, "review -5 -> None")
+    ok2 = assert_eq(_validate_review_count(0), 0, "review 0 valid")
+    ok3 = assert_eq(_validate_review_count(137), 137, "review 137 valid")
+    ok4 = assert_eq(_validate_review_count("1,234"), 1234, "review '1,234' cleaned")
+    ok5 = assert_true(not is_valid_review_count(-1), "is_valid_review_count rejects -1")
+    ok6 = assert_true(is_valid_review_count(6), "is_valid_review_count accepts 6")
+    return ok and ok2 and ok3 and ok4 and ok5 and ok6
+
+# 14. Rating i review se ne mogu zameniti + različiti leadovi različiti rating
+def test_rating_review_not_swapped_and_varied():
+    from validators import validate_lead
+    # rating i review imaju različite domene
+    lead_good = {"company_name":"Gym A","rating":4.8,"review_count":137}
+    errs = validate_lead(lead_good)
+    ok = assert_true(len(errs)==0, "valid rating 4.8 + reviews 137 -> no error")
+    # ako bi zamenili: rating=137, reviews=4.8 -> oba invalid
+    lead_swapped = {"company_name":"Gym A","rating":137,"review_count":4.8}
+    errs2 = validate_lead(lead_swapped)
+    ok2 = assert_true(any("rating" in e.lower() for e in errs2), "swapped rating 137 rejected")
+    # različiti leadovi mogu imati različite vrednosti — upis 2 leada sa različitim rating
+    p = temp_db()
+    conn = get_connection(p)
+    l1 = {"company_name":"Gym A","city":"Subotica","address":"A1","phone":"024 111111","place_id":None,"google_maps_url":None,"rating":4.8,"review_count":137,"scraped_at":"2026-01-01T00:00:00+00:00","lead_status":"New","audit_status":"Not Started","notes":""}
+    l2 = {"company_name":"Gym B","city":"Subotica","address":"B2","phone":"024 222222","place_id":None,"google_maps_url":None,"rating":3.2,"review_count":42,"scraped_at":"2026-01-01T00:00:00+00:00","lead_status":"New","audit_status":"Not Started","notes":""}
+    for l in (l1,l2):
+        upsert_lead(conn, score_lead(l))
+    rows = conn.execute("SELECT company_name, rating, review_count FROM leads ORDER BY company_name").fetchall()
+    ok3 = assert_eq(rows[0]["rating"], 4.8, "Gym A rating 4.8 kept")
+    ok4 = assert_eq(rows[1]["rating"], 3.2, "Gym B rating 3.2 different")
+    ok5 = assert_true(rows[0]["review_count"] != rows[1]["review_count"], "different review counts")
+    # None kada nije pronađeno
+    l3 = {"company_name":"Gym C","city":"Subotica","address":"C3","phone":"024 333333","place_id":None,"google_maps_url":None,"rating":None,"review_count":None,"scraped_at":"2026-01-01T00:00:00+00:00","lead_status":"New","audit_status":"Not Started","notes":""}
+    ok6 = assert_true(validate_lead(l3)==[], "None rating/reviews valid (not found)")
+    conn.close(); p.unlink(missing_ok=True)
+    return ok and ok2 and ok3 and ok4 and ok5 and ok6
+
+# 15. Website social vs official + OUTDATED_PLATFORMS
+def test_website_social_filter():
+    from scraper import _is_social_website
+    from scoring import calc_website_opportunity_score
+    # social URL ne sme biti website
+    ok = assert_true(_is_social_website("https://m.facebook.com/EverybodySubotica/"), "facebook detected as social")
+    ok2 = assert_true(_is_social_website("https://www.instagram.com/powergym/"), "instagram social")
+    ok3 = assert_true(not _is_social_website("https://examplegym.rs"), "examplegym not social")
+    ok4 = assert_true(not _is_social_website("https://powergym.rs"), "powergym not social")
+    # scoring razlike
+    ok5 = assert_eq(calc_website_opportunity_score(""), 10, "empty confirmed no website -> 10")
+    ok6 = assert_eq(calc_website_opportunity_score(None), None, "None unknown -> None")
+    ok7 = assert_eq(calc_website_opportunity_score("https://examplegym.rs"), 2, "official good -> 2")
+    ok8 = assert_eq(calc_website_opportunity_score("https://foo.wix.com/bar"), 7, "outdated wix -> 7")
+    # social filtriran treba da bude tretiran kao nema website -> 10
+    # ako scraper vrati website="" i facebook="https://m.facebook.com/..." onda je website prazan -> 10 je ispravno
+    ok9 = assert_eq(calc_website_opportunity_score(""), 10, "social filtered -> no official website -> 10")
+    return ok and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9
+
 # Run all
 run_test("Test A - Place ID dedup", test_place_id)
 run_test("Test URL dedup", test_url_dedup)
@@ -293,6 +367,10 @@ run_test("Test Scoring opportunity", test_scoring)
 run_test("Test Audit Unable", test_audit_unable)
 run_test("Test CSV stable/utf-8", test_csv)
 run_test("Test Source query", test_source_query)
+run_test("Test Rating validation (<=5)", test_rating_validation)
+run_test("Test Review count validation", test_review_count_validation)
+run_test("Test Rating/review not swapped & varied", test_rating_review_not_swapped_and_varied)
+run_test("Test Website social vs official", test_website_social_filter)
 
 print("\n" + "="*40)
 if all_pass:
