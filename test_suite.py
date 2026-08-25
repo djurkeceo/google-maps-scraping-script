@@ -16,6 +16,15 @@ from deduplication import find_existing, deduplicate_batch, extract_place_id
 from scoring import score_lead, calc_website_opportunity_score, calc_seo_opportunity_score, calc_conversion_opportunity_score
 from validators import validate_lead
 from website_audit import audit_website
+from prioritization import (
+    calculate_business_strength,
+    calculate_priority,
+    recommend_services,
+    classify_lead,
+    generate_lead_reason,
+    calculate_confidence,
+    prioritize_lead,
+)
 
 def assert_eq(a, b, msg=""):
     if a != b:
@@ -355,6 +364,118 @@ def test_website_social_filter():
     ok9 = assert_eq(calc_website_opportunity_score(""), 10, "social filtered -> no official website -> 10")
     return ok and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9
 
+# 16. Prioritization — Strong business + no website => HIGH/Multi-Service
+def test_prioritization_strong_no_website():
+    lead = {"company_name":"Power Gym","rating":4.8,"review_count":350,"website":"","facebook":"","instagram":"","website_opportunity_score":10,"seo_opportunity_score":10,"conversion_opportunity_score":10}
+    bs = calculate_business_strength(lead)
+    ok = assert_true(bs is not None and bs >= 7, f"strong business {bs} >=7")
+    lead["business_strength_score"] = bs
+    prio = calculate_priority(bs, 10, 10, 10)
+    ok2 = assert_true(prio is not None and prio >= 75, f"priority HIGH {prio} >=75")
+    services = recommend_services(lead, bs)
+    ok3 = assert_true("Website Development" in services, f"recommends Website {services}")
+    lead2 = prioritize_lead(dict(lead))
+    ok4 = assert_eq(lead2["priority"], "HIGH", "priority HIGH")
+    ok5 = assert_true("Website" in lead2["lead_type"] or "Multi-Service" in lead2["lead_type"], f"lead_type {lead2['lead_type']}")
+    return ok and ok2 and ok3 and ok4 and ok5
+
+# 17. Weak business + no website => LOW priority despite HIGH website opportunity
+def test_prioritization_weak_no_website():
+    lead = {"company_name":"Small Gym","rating":3.5,"review_count":7,"website":"","facebook":"","instagram":"","website_opportunity_score":10,"seo_opportunity_score":10,"conversion_opportunity_score":10}
+    bs = calculate_business_strength(lead)
+    ok = assert_true(bs is not None and bs <= 4, f"weak business {bs} <=4")
+    prio = calculate_priority(bs, 10, 10, 10)
+    ok2 = assert_true(prio is not None and prio < 75, f"priority not HIGH {prio} <75 (weak business)")
+    services = recommend_services(lead, bs)
+    # weak business should not recommend (min_business 4)
+    ok3 = assert_true(len(services)==0, f"weak business no services {services}")
+    return ok and ok2 and ok3
+
+# 18. Strong + weak SEO => SEO recommended
+def test_prioritization_strong_weak_seo():
+    lead = {"company_name":"SEO Gym","rating":4.8,"review_count":400,"website":"https://example.com","facebook":"","instagram":"","website_opportunity_score":2,"seo_opportunity_score":9,"conversion_opportunity_score":2}
+    bs = calculate_business_strength(lead)
+    ok = assert_true(bs is not None and bs >= 7, f"strong {bs}")
+    services = recommend_services(lead, bs)
+    ok2 = assert_true("SEO" in services or "Local SEO" in services, f"SEO recommended {services}")
+    lead2 = prioritize_lead(dict(lead))
+    ok3 = assert_true(lead2["priority"] in ("HIGH","MEDIUM"), f"priority high/medium {lead2['priority']}")
+    return ok and ok2 and ok3
+
+# 19. Strong + weak conversion => Conversion recommended
+def test_prioritization_strong_weak_conversion():
+    lead = {"company_name":"Conv Gym","rating":4.9,"review_count":500,"website":"https://example.com","website_opportunity_score":2,"seo_opportunity_score":2,"conversion_opportunity_score":9}
+    bs = calculate_business_strength(lead)
+    services = recommend_services(lead, bs)
+    ok = assert_true("Conversion Optimization" in services, f"conversion {services}")
+    return ok
+
+# 20. Strong + excellent (no opportunity) => no fabricated service
+def test_prioritization_no_opportunity():
+    lead = {"company_name":"Perfect Gym","rating":4.9,"review_count":500,"website":"https://example.com","website_opportunity_score":2,"seo_opportunity_score":2,"conversion_opportunity_score":2}
+    bs = calculate_business_strength(lead)
+    services = recommend_services(lead, bs)
+    ok = assert_eq(len(services), 0, f"no services for excellent {services}")
+    lead2 = prioritize_lead(dict(lead))
+    ok2 = assert_true(lead2["lead_type"] in ("Manual Review","Low Priority"), f"lead_type manual {lead2['lead_type']}")
+    return ok and ok2
+
+# 21. Missing rating => confidence reduced, no invented
+def test_prioritization_missing_rating():
+    lead = {"company_name":"No Rating Gym","rating":None,"review_count":100,"website":"","website_opportunity_score":10}
+    bs = calculate_business_strength(lead)
+    ok = assert_true(bs is not None, f"business calculable without rating {bs}")
+    # also test both None
+    lead2 = {"company_name":"No Data","rating":None,"review_count":None,"website":""}
+    bs2 = calculate_business_strength(lead2)
+    ok2 = assert_true(bs2 is None, f"both None -> None {bs2}")
+    # confidence
+    conf = calculate_confidence(lead2, bs2)
+    ok3 = assert_eq(conf, "Low", f"confidence Low {conf}")
+    return ok and ok2 and ok3
+
+# 22. Social media only => website HIGH
+def test_prioritization_social_only():
+    lead = {"company_name":"Social Gym","rating":4.8,"review_count":100,"website":"","facebook":"https://facebook.com/example","instagram":"","website_opportunity_score":10}
+    bs = calculate_business_strength(lead)
+    ok = assert_true(bs is not None and bs >= 6, f"social business {bs}")
+    services = recommend_services(lead, bs)
+    ok2 = assert_true("Website Development" in services, f"social no website -> Website {services}")
+    return ok and ok2
+
+# 23. Prioritization does not create duplicate, protected fields preserved
+def test_prioritization_protected_and_no_duplicate():
+    p = temp_db()
+    conn = get_connection(p)
+    lead = {"company_name":"Prot Gym","city":"Subotica","address":"Adr 1","phone":"024 111111","place_id":"0xPROT:0x1","google_maps_url":"https://maps/place/prot","rating":4.8,"review_count":200,"website":"https://example.com","scraped_at":"2026-01-01T00:00:00+00:00","lead_status":"Contacted","audit_status":"In Progress","notes":"manual note"}
+    lead = score_lead(lead)
+    lead = prioritize_lead(lead)
+    upsert_lead(conn, lead)
+    # re-prioritize existing
+    from database import PRIORITIZATION_FIELDS
+    cur = conn.execute("SELECT * FROM leads WHERE place_id='0xPROT:0x1'")
+    row = cur.fetchone()
+    # simulate re-prioritize
+    lead2 = dict(row)
+    lead2["rating"] = 4.9  # update scraped
+    lead2 = score_lead(lead2)
+    lead2 = prioritize_lead(lead2)
+    # ensure protected not overwritten via upsert logic (we use direct update for prioritization, but upsert should not overwrite)
+    # use upsert with _existing_id
+    eid = find_existing(conn, lead2)
+    lead2["_existing_id"] = eid
+    upsert_lead(conn, lead2)
+    # now run prioritize_existing via direct update
+    lead3 = dict(conn.execute("SELECT * FROM leads WHERE place_id='0xPROT:0x1'").fetchone())
+    # protected check
+    ok = assert_eq(lead3["lead_status"], "Contacted", "protected lead_status")
+    ok2 = assert_eq(lead3["notes"], "manual note", "protected notes")
+    ok3 = assert_eq(lead3["audit_status"], "In Progress", "protected audit_status")
+    cnt = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
+    ok4 = assert_eq(cnt, 1, "no duplicate from prioritization")
+    conn.close(); p.unlink(missing_ok=True)
+    return ok and ok2 and ok3 and ok4
+
 # Run all
 run_test("Test A - Place ID dedup", test_place_id)
 run_test("Test URL dedup", test_url_dedup)
@@ -371,6 +492,14 @@ run_test("Test Rating validation (<=5)", test_rating_validation)
 run_test("Test Review count validation", test_review_count_validation)
 run_test("Test Rating/review not swapped & varied", test_rating_review_not_swapped_and_varied)
 run_test("Test Website social vs official", test_website_social_filter)
+run_test("Prioritization strong + no website HIGH", test_prioritization_strong_no_website)
+run_test("Prioritization weak + no website LOW", test_prioritization_weak_no_website)
+run_test("Prioritization strong + weak SEO", test_prioritization_strong_weak_seo)
+run_test("Prioritization strong + weak conversion", test_prioritization_strong_weak_conversion)
+run_test("Prioritization no opportunity manual", test_prioritization_no_opportunity)
+run_test("Prioritization missing rating", test_prioritization_missing_rating)
+run_test("Prioritization social only", test_prioritization_social_only)
+run_test("Prioritization protected & no duplicate", test_prioritization_protected_and_no_duplicate)
 
 print("\n" + "="*40)
 if all_pass:

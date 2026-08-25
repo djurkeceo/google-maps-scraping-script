@@ -51,6 +51,19 @@ SCORING_FIELDS = [
     "conversion_opportunity_score",
 ]
 
+# Prioritization polja — generated, mogu se ponovo izracunati
+PRIORITIZATION_FIELDS = [
+    "business_strength_score",
+    "priority_score",
+    "priority",
+    "lead_type",
+    "recommended_services",
+    "lead_reason",
+    "sales_angle",
+    "prioritization_confidence",
+    "prioritization_updated_at",
+]
+
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS leads (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,6 +147,16 @@ def _ensure_migrations(conn: sqlite3.Connection) -> None:
         ("conversion_opportunity_score", "INTEGER"),
         ("http_status", "INTEGER"),
         ("response_time_ms", "INTEGER"),
+        # prioritization engine
+        ("business_strength_score", "INTEGER"),
+        ("priority_score", "INTEGER"),
+        ("priority", "TEXT"),
+        ("lead_type", "TEXT"),
+        ("recommended_services", "TEXT"),
+        ("lead_reason", "TEXT"),
+        ("sales_angle", "TEXT"),
+        ("prioritization_confidence", "TEXT"),
+        ("prioritization_updated_at", "TEXT"),
     ]
     for col, typedef in migrations:
         if not _column_exists(conn, "leads", col):
@@ -310,6 +333,11 @@ def upsert_lead(conn: sqlite3.Connection, lead: dict) -> str:
                 elif af in ("audit_data_json", "http_status", "response_time_ms"):
                     updates[af] = lead[af]
 
+        # Prioritization polja — generated, dozvoli ponovni izracun
+        for pf in PRIORITIZATION_FIELDS:
+            if lead.get(pf) not in (None, ""):
+                updates[pf] = lead[pf]
+
         # last_scraped_at uvek osveži, first ne diraj
         updates["last_scraped_at"] = lead.get("last_scraped_at") or lead.get("scraped_at") or now
         updates["scraped_at"] = updates["last_scraped_at"]
@@ -336,6 +364,9 @@ def _all_columns() -> set:
         "website_opportunity_score", "seo_opportunity_score", "conversion_opportunity_score",
         "audit_status", "automated_audit_status", "audit_data_json",
         "http_status", "response_time_ms",
+        "business_strength_score", "priority_score", "priority", "lead_type",
+        "recommended_services", "lead_reason", "sales_angle",
+        "prioritization_confidence", "prioritization_updated_at",
         "notes", "created_at", "updated_at",
     }
 

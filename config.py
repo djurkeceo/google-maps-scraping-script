@@ -69,6 +69,14 @@ CSV_COLUMNS = [
     "Conversion Score",  # deprecated alias
     "Automated Audit Status",
     "Audit Status",
+    "Business Strength Score",
+    "Priority Score",
+    "Priority",
+    "Lead Type",
+    "Recommended Services",
+    "Lead Reason",
+    "Sales Angle",
+    "Prioritization Confidence",
     "Notes",
 ]
 
@@ -104,8 +112,64 @@ HUBSPOT_COMPANY_PROPERTY_MAP = {
     "Conversion Score": "conversion_score",          # alias
     "Automated Audit Status": "automated_audit_status",  # CUSTOM (Dropdown)
     "Audit Status": "audit_status",                  # CUSTOM manual (Dropdown)
+    "Business Strength Score": "business_strength_score",  # CUSTOM Number 0-10
+    "Priority Score": "priority_score_zeltro",       # CUSTOM Number 0-100
+    "Priority": "priority_zeltro",                   # CUSTOM Dropdown HIGH/MEDIUM/LOW
+    "Lead Type": "lead_type",                        # CUSTOM Text
+    "Recommended Services": "recommended_services",   # CUSTOM Text (JSON)
+    "Lead Reason": "lead_reason",                    # CUSTOM Text
+    "Sales Angle": "sales_angle",                    # CUSTOM Text
+    "Prioritization Confidence": "prioritization_confidence",  # CUSTOM Dropdown
     "Notes": "notes_zeltro",                         # ili hs_notes_next_activity
 }
 
 # ── Scoring konstante ──
 SCORING_NOT_EVALUATED = ""  # ili "Not Evaluated" — ostavljamo prazno za HubSpot number polja
+
+# ── Business Strength (0-10) — koliko je jak market signal ──
+BUSINESS_STRENGTH_CONFIG = {
+    # rating thresholds: vracaju score 0-4
+    "rating_scores": [
+        (4.5, 4),
+        (4.0, 2),
+        (3.5, 1),
+        (0.0, 0),
+    ],
+    # review thresholds sa diminishing returns — piecewise
+    # (upper_bound, score) — score 0-10
+    "review_scores": [
+        (9, 0),
+        (49, 2),
+        (99, 4),
+        (299, 6),
+        (599, 8),
+        (float("inf"), 10),
+    ],
+    # tezine: rating 60%, reviews 35%, social 5%
+    "weights": {"rating": 0.6, "reviews": 0.35, "social": 0.05},
+    "social_bonus": 1,  # +1 ako ima instagram ili facebook
+}
+
+# ── Priority (0-100) ──
+PRIORITY_CONFIG = {
+    # tezine: business 55%, opportunity 45%
+    "weights": {"business": 0.55, "opportunity": 0.45},
+    "thresholds": {"HIGH": 75, "MEDIUM": 50},  # <50 => LOW
+}
+
+# ── Service preporuka — opportunity >= ovog praga se smatra visok ──
+SERVICE_RECOMMENDATION_CONFIG = {
+    "website_threshold": 7,
+    "seo_threshold": 6,
+    "conversion_threshold": 6,
+    "performance_threshold_response_ms": 3000,
+    "performance_threshold_http": 400,
+    "min_business_for_service": 4,  # ispod ovoga ne preporucuj nista (Low Confidence)
+}
+
+# ── Prioritization confidence ──
+PRIORITIZATION_CONFIDENCE_CONFIG = {
+    # koliko pouzdanih signala je potrebno za High/Medium
+    # High: rating + reviews + (website ili bar jedan audit)
+    # Medium: bar 2 od 3, Low: manje
+}

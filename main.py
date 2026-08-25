@@ -3,7 +3,7 @@ Zeltro Lead Scraper — Google Maps → SQLite → HubSpot CSV
 ==========================================================
 Workflow:
   Google Maps scraping → čišćenje → validacija → deduplikacija
-  → lead scoring → SQLite (incremental) → website audit → HubSpot CSV export
+  → lead scoring → SQLite (incremental) → website audit → prioritization → HubSpot CSV export
 
 Primeri:
   py main.py --query "teretana" --city "Subotica" --max-results 30
@@ -14,6 +14,10 @@ Primeri:
   py main.py --audit-websites
   py main.py --audit-websites --audit-limit 20
   py main.py --export-only --audit-websites
+  py main.py --prioritize-existing
+  py main.py --prioritize-existing --export-only
+  py main.py --show-top 20
+  py main.py --prioritize-existing --show-top 20
 """
 
 import argparse
@@ -28,6 +32,7 @@ from exporter import export_companies_csv
 from scraper import scrape_google_maps
 from validators import validate_lead, clean_lead
 from scoring import score_lead
+from prioritization import prioritize_lead
 
 
 def parse_args():
@@ -43,6 +48,8 @@ def parse_args():
     parser.add_argument("--audit-websites", action="store_true", help="Pokreni website audit nad postojecim leadovima (ne zahteva scraping)")
     parser.add_argument("--audit-limit", type=int, default=50, help="Max websites za audit u jednom run-u (default 50)")
     parser.add_argument("--audit-only", action="store_true", help="Samo audit, bez scraping/exporta (alias)")
+    parser.add_argument("--prioritize-existing", action="store_true", help="Ponovo izracunaj business_strength/priority za postojece leadove bez scraping-a")
+    parser.add_argument("--show-top", type=int, default=None, metavar="N", help="Prikazi TOP N leadova sortiranih po priority_score")
     return parser.parse_args()
 
 
@@ -137,12 +144,17 @@ def process_leads(leads: list[dict], conn, do_audit: bool = False, audit_limit: 
         except Exception as e:
             print(f"   [audit] Greska pri batch auditu: {e}")
 
-    # 2. Validacija + scoring + upsert
+    # 2. Validacija + scoring + prioritization + upsert
     for lead in unique_leads:
         lead = clean_lead(lead)
         # scoring ako nije već urađen ili ako je audit dodao nove podatke
         if lead.get("website_opportunity_score") is None and lead.get("website_score") is None:
             lead = score_lead(lead, audit_data=lead.get("audit_data_json"))
+        # prioritization — uvek izracunaj (koristi najnovije scoring/audit)
+        try:
+            lead = prioritize_lead(lead)
+        except Exception as e:
+            print(f"   [prioritization] Greska za {lead.get('company_name','?')}: {e}")
 
         errors = validate_lead(lead)
         if errors:
@@ -321,6 +333,75 @@ def run_audit_on_existing(conn, limit: int = 50) -> dict:
         return {"audited": 0, "failures": 0}
 
 
+def prioritize_existing_leads(conn) -> dict:
+    """Ponovo izracunaj prioritization za sve postojece leadove bez scraping-a. Cuva protected polja."""
+    from database import PRIORITIZATION_FIELDS
+    cur = conn.execute("SELECT * FROM leads")
+    rows = cur.fetchall()
+    updated = 0
+    for r in rows:
+        lead = dict(r)
+        # scoring je vec u bazi, ali ako fali, izracunaj
+        if lead.get("website_opportunity_score") is None and lead.get("website_score") is None:
+            lead = score_lead(lead, audit_data=lead.get("audit_data_json"))
+        try:
+            lead = prioritize_lead(lead)
+        except Exception as e:
+            print(f"   [prioritization] Greska za {lead.get('company_name','?')}: {e}")
+            continue
+        # upisi samo prioritization polja + updated_at
+        updates = {k: lead.get(k) for k in PRIORITIZATION_FIELDS if lead.get(k) is not None}
+        if not updates:
+            continue
+        updates["prioritization_updated_at"] = lead.get("prioritization_updated_at")
+        set_clause = ", ".join([f"{k}=?" for k in updates.keys()])
+        conn.execute(f"UPDATE leads SET {set_clause}, updated_at=datetime('now') WHERE id=?", list(updates.values()) + [lead["id"]])
+        updated += 1
+    conn.commit()
+    print(f"   Prioritizovano {updated} leadova")
+    return {"prioritized": updated}
+
+
+def show_top_leads(conn, n: int = 20):
+    """Prikazi TOP N leadova sortiranih po priority_score."""
+    try:
+        cur = conn.execute("""
+            SELECT company_name, rating, review_count, website, business_strength_score, website_opportunity_score, seo_opportunity_score, conversion_opportunity_score, priority_score, priority, lead_type, recommended_services, lead_reason, prioritization_confidence
+            FROM leads
+            ORDER BY priority_score DESC, business_strength_score DESC, lead_score DESC, rating DESC
+            LIMIT ?
+        """, (n,))
+    except Exception:
+        cur = conn.execute("SELECT company_name, rating, review_count, website, business_strength_score, priority_score, priority FROM leads ORDER BY id ASC LIMIT ?", (n,))
+    rows = cur.fetchall()
+    if not rows:
+        print("   Nema leadova za prikaz.")
+        return
+    print("\n" + "="*70)
+    print(f"  TOP {len(rows)} LEADS — sortirano po priority_score")
+    print("="*70)
+    for i, r in enumerate(rows, 1):
+        rec = r["recommended_services"] if "recommended_services" in r.keys() else ""
+        try:
+            import json
+            arr = json.loads(rec) if rec else []
+            rec_str = ", ".join(arr) if arr else "—"
+        except Exception:
+            rec_str = str(rec) if rec else "—"
+        reason = r["lead_reason"] if "lead_reason" in r.keys() and r["lead_reason"] else ""
+        print(f"{i}. {r['company_name']}")
+        print(f"   Priority: {r['priority_score'] if 'priority_score' in r.keys() and r['priority_score'] is not None else 'N/A'} {r['priority'] if 'priority' in r.keys() and r['priority'] else ''} | Business Strength: {r['business_strength_score'] if 'business_strength_score' in r.keys() else 'N/A'}")
+        if "website_opportunity_score" in r.keys():
+            print(f"   Website: {r['website'][:40] if r['website'] else 'None'} | W:{r['website_opportunity_score']} SEO:{r['seo_opportunity_score']} Conv:{r['conversion_opportunity_score']} | Rating: {r['rating']} Reviews: {r['review_count']}")
+        print(f"   Services: {rec_str}")
+        if reason:
+            print(f"   Reason: {reason}")
+        if "prioritization_confidence" in r.keys() and r["prioritization_confidence"]:
+            print(f"   Confidence: {r['prioritization_confidence']}")
+        print()
+    print("="*70)
+
+
 async def main():
     args = parse_args()
 
@@ -351,15 +432,29 @@ async def main():
         if args.migrate_csv:
             migrate_old_csvs(conn)
 
+        # prioritize existing if requested — bez scraping-a, koristi postojece audit/scoring podatke
+        if args.prioritize_existing:
+            print("\nPrioritizacija postojecih leadova...")
+            stats = prioritize_existing_leads(conn)
+            summary["prioritized"] = stats.get("prioritized", 0)
+
+        # show-top standalone — bez scraping-a (npr. samo `py main.py --show-top 20`)
+        if args.show_top is not None and not args.prioritize_existing and not args.audit_websites and not args.migrate_csv and not args.query and not args.queries and not args.export_only:
+            show_top_leads(conn, n=args.show_top)
+            export_path = export_companies_csv(conn)
+            print(f"\nExport: {export_path}")
+            print(f"\n  Database: {db_path} ({conn.execute('SELECT COUNT(*) FROM leads').fetchone()[0]} ukupno)")
+            return
+
         # audit-only pre scraping
         if args.audit_websites and args.export_only:
             audit_stats = run_audit_on_existing(conn, limit=args.audit_limit)
             summary["websites_audited"] = audit_stats.get("audited", 0)
             summary["audit_failures"] = audit_stats.get("failures", 0)
 
-        if args.export_only and not args.audit_websites:
+        if args.export_only and not args.audit_websites and not args.prioritize_existing:
             print("\nExport-only mod — preskacem scraping")
-        elif not args.export_only:
+        elif not args.export_only and not args.prioritize_existing:
             searches = build_search_queries(args)
             print(f"\nPretrage: {[s[0] for s in searches]}")
             print(f"   Max po pretrazi: {args.max_results}")
@@ -432,6 +527,10 @@ async def main():
         except Exception:
             pass
         print("=" * 55)
+
+        # show top if requested
+        if args.show_top is not None:
+            show_top_leads(conn, n=args.show_top)
 
         print("\n  Database updated successfully.")
 

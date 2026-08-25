@@ -41,6 +41,14 @@ DB_TO_CSV_MAP = {
     "conversion_score": "Conversion Score",
     "automated_audit_status": "Automated Audit Status",
     "audit_status": "Audit Status",
+    "business_strength_score": "Business Strength Score",
+    "priority_score": "Priority Score",
+    "priority": "Priority",
+    "lead_type": "Lead Type",
+    "recommended_services": "Recommended Services",
+    "lead_reason": "Lead Reason",
+    "sales_angle": "Sales Angle",
+    "prioritization_confidence": "Prioritization Confidence",
     "notes": "Notes",
 }
 
@@ -57,11 +65,14 @@ def export_companies_csv(conn: sqlite3.Connection, output_path: Path | None = No
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # sort po lead_score (opportunity) pa rating
+    # sort po priority_score (novi glavni) pa lead_score pa rating
     try:
-        cur = conn.execute("SELECT * FROM leads ORDER BY lead_score DESC, rating DESC, id ASC")
+        cur = conn.execute("SELECT * FROM leads ORDER BY priority_score DESC, lead_score DESC, rating DESC, id ASC")
     except sqlite3.OperationalError:
-        cur = conn.execute("SELECT * FROM leads ORDER BY id ASC")
+        try:
+            cur = conn.execute("SELECT * FROM leads ORDER BY lead_score DESC, rating DESC, id ASC")
+        except sqlite3.OperationalError:
+            cur = conn.execute("SELECT * FROM leads ORDER BY id ASC")
     rows = cur.fetchall()
 
     with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
@@ -142,13 +153,28 @@ def export_companies_csv(conn: sqlite3.Connection, output_path: Path | None = No
 
                 # Scoring kolone: None → prazno
                 if csv_col in ("Lead Score", "Website Score", "SEO Score", "Conversion Score",
-                               "Website Opportunity Score", "SEO Opportunity Score", "Conversion Opportunity Score"):
+                               "Website Opportunity Score", "SEO Opportunity Score", "Conversion Opportunity Score",
+                               "Business Strength Score", "Priority Score"):
                     if val is None or val == "":
                         csv_row[csv_col] = ""
                     else:
                         csv_row[csv_col] = str(val)
                 elif csv_col in ("Rating", "Review Count"):
                     csv_row[csv_col] = "" if val is None else str(val)
+                elif csv_col == "Recommended Services":
+                    # recommended_services je JSON array u bazi -> pretvori u "A, B" za CSV
+                    if val is None or val == "":
+                        csv_row[csv_col] = ""
+                    else:
+                        try:
+                            import json
+                            arr = json.loads(val)
+                            if isinstance(arr, list):
+                                csv_row[csv_col] = ", ".join(arr)
+                            else:
+                                csv_row[csv_col] = str(val)
+                        except Exception:
+                            csv_row[csv_col] = str(val)
                 else:
                     csv_row[csv_col] = "" if val is None else str(val)
 
