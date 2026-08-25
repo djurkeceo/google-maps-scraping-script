@@ -49,6 +49,8 @@ SCORING_FIELDS = [
     "website_opportunity_score",
     "seo_opportunity_score",
     "conversion_opportunity_score",
+    "local_seo_opportunity_score",
+    "performance_opportunity_score",
 ]
 
 # Prioritization polja — generated, mogu se ponovo izracunati
@@ -62,6 +64,7 @@ PRIORITIZATION_FIELDS = [
     "sales_angle",
     "prioritization_confidence",
     "prioritization_updated_at",
+    "opportunity_evidence",
 ]
 
 CREATE_TABLE_SQL = """
@@ -157,6 +160,10 @@ def _ensure_migrations(conn: sqlite3.Connection) -> None:
         ("sales_angle", "TEXT"),
         ("prioritization_confidence", "TEXT"),
         ("prioritization_updated_at", "TEXT"),
+        # kalibracija: local seo / performance / evidence
+        ("local_seo_opportunity_score", "INTEGER"),
+        ("performance_opportunity_score", "INTEGER"),
+        ("opportunity_evidence", "TEXT"),
     ]
     for col, typedef in migrations:
         if not _column_exists(conn, "leads", col):
@@ -362,11 +369,12 @@ def _all_columns() -> set:
         "lead_status", "lead_score",
         "website_score", "seo_score", "conversion_score",
         "website_opportunity_score", "seo_opportunity_score", "conversion_opportunity_score",
+        "local_seo_opportunity_score", "performance_opportunity_score",
         "audit_status", "automated_audit_status", "audit_data_json",
         "http_status", "response_time_ms",
         "business_strength_score", "priority_score", "priority", "lead_type",
         "recommended_services", "lead_reason", "sales_angle",
-        "prioritization_confidence", "prioritization_updated_at",
+        "prioritization_confidence", "prioritization_updated_at", "opportunity_evidence",
         "notes", "created_at", "updated_at",
     }
 

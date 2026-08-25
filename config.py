@@ -67,6 +67,8 @@ CSV_COLUMNS = [
     "SEO Score",  # deprecated alias
     "Conversion Opportunity Score",
     "Conversion Score",  # deprecated alias
+    "Local SEO Opportunity Score",
+    "Performance Opportunity Score",
     "Automated Audit Status",
     "Audit Status",
     "Business Strength Score",
@@ -77,6 +79,7 @@ CSV_COLUMNS = [
     "Lead Reason",
     "Sales Angle",
     "Prioritization Confidence",
+    "Opportunity Evidence",
     "Notes",
 ]
 
@@ -120,6 +123,9 @@ HUBSPOT_COMPANY_PROPERTY_MAP = {
     "Lead Reason": "lead_reason",                    # CUSTOM Text
     "Sales Angle": "sales_angle",                    # CUSTOM Text
     "Prioritization Confidence": "prioritization_confidence",  # CUSTOM Dropdown
+    "Local SEO Opportunity Score": "local_seo_opportunity_score",  # CUSTOM 0-10
+    "Performance Opportunity Score": "performance_opportunity_score",  # CUSTOM 0-10
+    "Opportunity Evidence": "opportunity_evidence",   # CUSTOM JSON
     "Notes": "notes_zeltro",                         # ili hs_notes_next_activity
 }
 
@@ -127,44 +133,57 @@ HUBSPOT_COMPANY_PROPERTY_MAP = {
 SCORING_NOT_EVALUATED = ""  # ili "Not Evaluated" — ostavljamo prazno za HubSpot number polja
 
 # ── Business Strength (0-10) — koliko je jak market signal ──
+# Kalibrisano: review count dominantan, rating secondary, 5.0/1 review ne sme biti HIGH
 BUSINESS_STRENGTH_CONFIG = {
-    # rating thresholds: vracaju score 0-4
+    # rating daje 0-4 pre skaliranja (secondary)
     "rating_scores": [
         (4.5, 4),
         (4.0, 2),
         (3.5, 1),
         (0.0, 0),
     ],
-    # review thresholds sa diminishing returns — piecewise
-    # (upper_bound, score) — score 0-10
+    # reviews: diminishing returns, 0-4→0, 5-19→2, 20-49→4, 50-99→6, 100-299→8, 300+→10
     "review_scores": [
-        (9, 0),
-        (49, 2),
-        (99, 4),
-        (299, 6),
-        (599, 8),
+        (4, 0),
+        (19, 2),
+        (49, 4),
+        (99, 6),
+        (299, 8),
         (float("inf"), 10),
     ],
-    # tezine: rating 60%, reviews 35%, social 5%
-    "weights": {"rating": 0.6, "reviews": 0.35, "social": 0.05},
-    "social_bonus": 1,  # +1 ako ima instagram ili facebook
+    # tezine: reviews 70%, rating 25%, social 5% — rating ne sme dominirati
+    "weights": {"reviews": 0.70, "rating": 0.25, "social": 0.05},
+    "social_bonus": 1,
 }
 
-# ── Priority (0-100) ──
+# ── Priority (0-100) — vredan outreach? ──
 PRIORITY_CONFIG = {
-    # tezine: business 55%, opportunity 45%
-    "weights": {"business": 0.55, "opportunity": 0.45},
-    "thresholds": {"HIGH": 75, "MEDIUM": 50},  # <50 => LOW
+    # business 60% (spreči LOW business + HIGH opp → HIGH), opportunity 40%
+    "weights": {"business": 0.60, "opportunity": 0.40},
+    "thresholds": {"HIGH": 75, "MEDIUM": 50},
 }
 
-# ── Service preporuka — opportunity >= ovog praga se smatra visok ──
+# ── Service preporuka — strogo evidence-based ──
 SERVICE_RECOMMENDATION_CONFIG = {
     "website_threshold": 7,
+    "local_seo_threshold": 6,
     "seo_threshold": 6,
     "conversion_threshold": 6,
     "performance_threshold_response_ms": 3000,
     "performance_threshold_http": 400,
-    "min_business_for_service": 4,  # ispod ovoga ne preporucuj nista (Low Confidence)
+    "min_business_for_service": 5,  # ispod 5 (LOW-MEDIUM business) ne preporucuj
+}
+
+# ── Local SEO Opportunity (0-10) — bez website-a, iz Google signala ──
+LOCAL_SEO_CONFIG = {
+    # koliko jak local signal treba za high opportunity
+    # local SEO gap = jak business ali slab owned presence
+    "strong_business_min": 6,
+}
+
+# ── Performance Opportunity ──
+PERFORMANCE_CONFIG = {
+    "slow_ms": 3000,
 }
 
 # ── Prioritization confidence ──

@@ -46,16 +46,17 @@ def calc_seo_score(website: str, has_website: bool = True) -> int | None:
 
 def calc_seo_opportunity_score(website: str | None, audit_data: dict | str | None = None) -> int | None:
     """
-    SEO opportunity zahteva audit.
-    - website is None -> None (unknown, ne nagađaj)
-    - website == "" (nema sajta) -> 10 (nema SEO)
+    SEO opportunity zahteva website + audit.
+    - website is None -> None (unknown)
+    - website == "" (nema sajta) -> None (N/A, ne možemo auditirati on-page SEO bez sajta)
     - sa sajtom ali bez audita -> None (Not Evaluated)
     - sa auditom: svaka missing SEO stavka povecava skor
+    Za Local SEO bez website-a koristi calc_local_seo_opportunity_score.
     """
     if website is None:
         return None
     if isinstance(website, str) and website.strip() == "":
-        return 10
+        return None
 
     # pokusaj da parsiras audit_data ako je JSON string
     if isinstance(audit_data, str):
@@ -97,16 +98,16 @@ def calc_conversion_score(website: str) -> int | None:
 
 def calc_conversion_opportunity_score(website: str | None, audit_data: dict | str | None = None) -> int | None:
     """
-    Conversion opportunity.
-    - website is None -> None (unknown)
-    - website == "" (nema sajta) -> 10
+    Conversion opportunity — samo ako postoji official website.
+    - website is None -> None
+    - website == "" (nema sajta) -> None (N/A, nema sta da se konvertuje)
     - sa sajtom bez audita -> None
     - sa auditom: proveri tel, form, booking, CTA, offer
     """
     if website is None:
         return None
     if isinstance(website, str) and website.strip() == "":
-        return 10
+        return None
 
     if isinstance(audit_data, str):
         try:
@@ -133,6 +134,102 @@ def calc_conversion_opportunity_score(website: str | None, audit_data: dict | st
         score += 1
     if not audit_data.get("has_maps_link"):
         score += 1
+    return min(score, 10)
+
+
+# ── Local SEO Opportunity (0-10) — može i bez website-a ──
+
+def calc_local_seo_opportunity_score(lead: dict, website: str | None, audit_data: dict | str | None = None) -> int | None:
+    """
+    Local SEO gap — procena na osnovu Google signala + website-a.
+    - website is None -> None (unknown)
+    - bez website-a: jak business (reviews/rating) => visok local SEO opportunity (treba website za lokalnu vidljivost)
+    - sa website-om: koristi SEO audit kao proxy, ako nema audita -> None
+    """
+    if website is None:
+        return None
+    # bez website-a: local SEO opportunity postoji, ali zavisi od business_strength
+    if isinstance(website, str) and website.strip() == "":
+        # proceni business_strength ako nije u lead-u
+        bs = lead.get("business_strength_score")
+        # ako nema bs, probaj iz rating/reviews grubo
+        if bs is None:
+            try:
+                reviews = int(lead.get("review_count") or 0)
+                rating = float(lead.get("rating") or 0)
+                if reviews >= 100 and rating >= 4.5:
+                    bs = 8
+                elif reviews >= 50:
+                    bs = 6
+                elif reviews >= 20:
+                    bs = 4
+                else:
+                    bs = 2
+            except Exception:
+                bs = 2
+        if bs >= 6:
+            return 8
+        if bs >= 4:
+            return 6
+        return 4
+
+    # sa website-om: koristi SEO audit ako postoji, inače None
+    if isinstance(audit_data, str):
+        try:
+            audit_data = json.loads(audit_data)
+        except Exception:
+            audit_data = None
+    if not audit_data or not isinstance(audit_data, dict):
+        return None
+    if audit_data.get("error") or audit_data.get("http_status") is None or audit_data.get("http_status", 200) >= 400:
+        return None
+    # za local SEO, isti signali kao SEO ali sa manjim pragovima
+    score = 0
+    if not audit_data.get("title"):
+        score += 3
+    if not audit_data.get("meta_description"):
+        score += 2
+    if not audit_data.get("h1"):
+        score += 2
+    # local specific: nema Google Maps linka na sajtu, nema adrese? za sada pojednostavljeno
+    return min(score, 8)
+
+
+# ── Performance Opportunity (0-10) — samo sa audit evidence ──
+
+def calc_performance_opportunity_score(audit_data: dict | str | None = None) -> int | None:
+    """
+    Performance gap — samo ako postoji merenje.
+    - bez audit_data -> None (ne pretpostavljaj)
+    - response_time_ms >3000 => 8, >1500 => 4, inače 0
+    - http >=400 => 6 (maintenance)
+    """
+    if isinstance(audit_data, str):
+        try:
+            audit_data = json.loads(audit_data)
+        except Exception:
+            audit_data = None
+    if not audit_data or not isinstance(audit_data, dict):
+        return None
+    if audit_data.get("error"):
+        return None
+    rt = audit_data.get("response_time_ms")
+    http = audit_data.get("http_status")
+    if rt is None and http is None:
+        return None
+    score = 0
+    if isinstance(rt, int):
+        if rt >= 3000:
+            score = 8
+        elif rt >= 1500:
+            score = 4
+        else:
+            score = 0
+    if isinstance(http, int) and http >= 400:
+        score = max(score, 6)
+    # ako je brz i http ok, nema opportunity
+    if score == 0:
+        return 2  # mali performance gap, ali ne visok
     return min(score, 10)
 
 
@@ -211,6 +308,9 @@ def score_lead(lead: dict, audit_data: dict | str | None = None) -> dict:
     ws = calc_website_opportunity_score(website)
     ss = calc_seo_opportunity_score(website, audit_data=audit_data)
     cs = calc_conversion_opportunity_score(website, audit_data=audit_data)
+    # novi: local SEO i performance — strogo evidence-based, None ako nema website/audit
+    local_seo = calc_local_seo_opportunity_score(lead, website, audit_data=audit_data)
+    perf = calc_performance_opportunity_score(audit_data=audit_data)
     bs = calc_business_score(lead)
 
     # Upisi i nove i stare ključeve za kompatibilnost
@@ -222,6 +322,9 @@ def score_lead(lead: dict, audit_data: dict | str | None = None) -> dict:
 
     lead["conversion_opportunity_score"] = cs
     lead["conversion_score"] = cs
+
+    lead["local_seo_opportunity_score"] = local_seo
+    lead["performance_opportunity_score"] = perf
 
     lead["lead_score"] = calc_lead_score(ws, ss, cs, bs)
 

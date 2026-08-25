@@ -334,28 +334,65 @@ def run_audit_on_existing(conn, limit: int = 50) -> dict:
 
 
 def prioritize_existing_leads(conn) -> dict:
-    """Ponovo izracunaj prioritization za sve postojece leadove bez scraping-a. Cuva protected polja."""
-    from database import PRIORITIZATION_FIELDS
+    """Ponovo izracunaj scoring + prioritization za sve postojece leadove bez scraping-a. Cuva protected polja."""
+    from database import PRIORITIZATION_FIELDS, SCORING_FIELDS
     cur = conn.execute("SELECT * FROM leads")
     rows = cur.fetchall()
     updated = 0
     for r in rows:
         lead = dict(r)
-        # scoring je vec u bazi, ali ako fali, izracunaj
-        if lead.get("website_opportunity_score") is None and lead.get("website_score") is None:
-            lead = score_lead(lead, audit_data=lead.get("audit_data_json"))
+        # uvek re-score sa novom logikom (npr. SEO za no-website sada None, local seo, performance)
         try:
+            lead = score_lead(lead, audit_data=lead.get("audit_data_json"))
             lead = prioritize_lead(lead)
         except Exception as e:
             print(f"   [prioritization] Greska za {lead.get('company_name','?')}: {e}")
             continue
-        # upisi samo prioritization polja + updated_at
-        updates = {k: lead.get(k) for k in PRIORITIZATION_FIELDS if lead.get(k) is not None}
+        # upisi scoring + prioritization polja
+        updates = {}
+        for k in SCORING_FIELDS:
+            if lead.get(k) is not None:
+                updates[k] = lead[k]
+                # sync aliases
+                if k == "website_opportunity_score":
+                    updates["website_score"] = lead[k]
+                if k == "local_seo_opportunity_score":
+                    pass
+                if k == "performance_opportunity_score":
+                    pass
+        for k in PRIORITIZATION_FIELDS:
+            if lead.get(k) is not None:
+                updates[k] = lead[k]
+        # opportunity_evidence je deo prioritization, ali moze biti prazan JSON
+        if lead.get("opportunity_evidence") is not None:
+            updates["opportunity_evidence"] = lead.get("opportunity_evidence")
+        if lead.get("local_seo_opportunity_score") is not None:
+            updates["local_seo_opportunity_score"] = lead.get("local_seo_opportunity_score")
+        if lead.get("performance_opportunity_score") is not None:
+            updates["performance_opportunity_score"] = lead.get("performance_opportunity_score")
+        # eksplicitno dozvoli None za SEO/Conversion kad nema website (treba obrisati stari 10)
+        # ako je website prazan, SEO i Conversion treba biti NULL
+        website = (lead.get("website") or "")
+        if isinstance(website, str) and website.strip() == "":
+            updates["seo_opportunity_score"] = None
+            updates["seo_score"] = None
+            updates["conversion_opportunity_score"] = None
+            updates["conversion_score"] = None
+            updates["performance_opportunity_score"] = None
         if not updates:
             continue
+        # uvek azuriraj prioritization_updated_at
         updates["prioritization_updated_at"] = lead.get("prioritization_updated_at")
         set_clause = ", ".join([f"{k}=?" for k in updates.keys()])
-        conn.execute(f"UPDATE leads SET {set_clause}, updated_at=datetime('now') WHERE id=?", list(updates.values()) + [lead["id"]])
+        # za None vrednosti, koristi direktan SET ... = NULL
+        # sqlite ne dozvoljava ? sa None za NULL? dozvoljava, ali eksplicitno
+        vals = []
+        for k in list(updates.keys()):
+            vals.append(updates[k])
+        conn.execute(f"UPDATE leads SET {set_clause}, updated_at=datetime('now') WHERE id=?", vals + [lead["id"]])
+        # dodatno eksplicitno postavi NULL gde treba (ako je website prazan)
+        if isinstance(website, str) and website.strip() == "":
+            conn.execute("UPDATE leads SET seo_opportunity_score=NULL, seo_score=NULL, conversion_opportunity_score=NULL, conversion_score=NULL, performance_opportunity_score=NULL WHERE id=?", (lead["id"],))
         updated += 1
     conn.commit()
     print(f"   Prioritizovano {updated} leadova")
@@ -366,7 +403,7 @@ def show_top_leads(conn, n: int = 20):
     """Prikazi TOP N leadova sortiranih po priority_score."""
     try:
         cur = conn.execute("""
-            SELECT company_name, rating, review_count, website, business_strength_score, website_opportunity_score, seo_opportunity_score, conversion_opportunity_score, priority_score, priority, lead_type, recommended_services, lead_reason, prioritization_confidence
+            SELECT company_name, rating, review_count, website, business_strength_score, website_opportunity_score, seo_opportunity_score, conversion_opportunity_score, local_seo_opportunity_score, performance_opportunity_score, priority_score, priority, lead_type, recommended_services, lead_reason, sales_angle, prioritization_confidence, opportunity_evidence
             FROM leads
             ORDER BY priority_score DESC, business_strength_score DESC, lead_score DESC, rating DESC
             LIMIT ?
@@ -389,15 +426,29 @@ def show_top_leads(conn, n: int = 20):
         except Exception:
             rec_str = str(rec) if rec else "—"
         reason = r["lead_reason"] if "lead_reason" in r.keys() and r["lead_reason"] else ""
+        sales = r["sales_angle"] if "sales_angle" in r.keys() and r["sales_angle"] else ""
+        local_opp = r["local_seo_opportunity_score"] if "local_seo_opportunity_score" in r.keys() else None
+        perf_opp = r["performance_opportunity_score"] if "performance_opportunity_score" in r.keys() else None
         print(f"{i}. {r['company_name']}")
         print(f"   Priority: {r['priority_score'] if 'priority_score' in r.keys() and r['priority_score'] is not None else 'N/A'} {r['priority'] if 'priority' in r.keys() and r['priority'] else ''} | Business Strength: {r['business_strength_score'] if 'business_strength_score' in r.keys() else 'N/A'}")
         if "website_opportunity_score" in r.keys():
-            print(f"   Website: {r['website'][:40] if r['website'] else 'None'} | W:{r['website_opportunity_score']} SEO:{r['seo_opportunity_score']} Conv:{r['conversion_opportunity_score']} | Rating: {r['rating']} Reviews: {r['review_count']}")
+            print(f"   Website: {r['website'][:40] if r['website'] else 'None'} | W:{r['website_opportunity_score']} SEO:{r['seo_opportunity_score']} Local:{local_opp} Conv:{r['conversion_opportunity_score']} Perf:{perf_opp} | Rating: {r['rating']} Reviews: {r['review_count']}")
         print(f"   Services: {rec_str}")
         if reason:
             print(f"   Reason: {reason}")
+        if sales:
+            print(f"   Sales Angle: {sales}")
         if "prioritization_confidence" in r.keys() and r["prioritization_confidence"]:
             print(f"   Confidence: {r['prioritization_confidence']}")
+        # opportunity evidence (short)
+        if "opportunity_evidence" in r.keys() and r["opportunity_evidence"]:
+            try:
+                import json as _j
+                ev = _j.loads(r["opportunity_evidence"])
+                if ev:
+                    print(f"   Evidence: {r['opportunity_evidence'][:120]}")
+            except Exception:
+                pass
         print()
     print("="*70)
 

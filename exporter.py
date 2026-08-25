@@ -49,6 +49,9 @@ DB_TO_CSV_MAP = {
     "lead_reason": "Lead Reason",
     "sales_angle": "Sales Angle",
     "prioritization_confidence": "Prioritization Confidence",
+    "local_seo_opportunity_score": "Local SEO Opportunity Score",
+    "performance_opportunity_score": "Performance Opportunity Score",
+    "opportunity_evidence": "Opportunity Evidence",
     "notes": "Notes",
 }
 
@@ -154,6 +157,7 @@ def export_companies_csv(conn: sqlite3.Connection, output_path: Path | None = No
                 # Scoring kolone: None → prazno
                 if csv_col in ("Lead Score", "Website Score", "SEO Score", "Conversion Score",
                                "Website Opportunity Score", "SEO Opportunity Score", "Conversion Opportunity Score",
+                               "Local SEO Opportunity Score", "Performance Opportunity Score",
                                "Business Strength Score", "Priority Score"):
                     if val is None or val == "":
                         csv_row[csv_col] = ""
